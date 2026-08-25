@@ -1,4 +1,0 @@
-module io.github.murdialthaf.archydock
-DockIcon 1.0 DockIcon.qml
-DockLauncher 1.0 DockLauncher.qml
-CtxMenuItem 1.0 CtxMenuItem.qml
