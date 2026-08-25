@@ -13,8 +13,10 @@ Item {
     property string position: "bottom"
     property bool isVertical: position === "left" || position === "right"
     property int iconSize: 48
-    property int spacing: 2
-    property int padding: 8
+    property int spacing: 4
+    property int padding: 5
+    property int radius: 11
+    property real opacity_: 0.8
     property var pinnedIds: []
     property var savedData: ({})
 
@@ -97,6 +99,11 @@ Item {
                 pendingDesktopId = ""
             }
         }
+    }
+
+    Process {
+        id: menuProc
+        command: ["omarchy-shell", "shell", "toggle", "omarchy.menu", "{\"menu\":\"root\"}"]
     }
 
     function launchApp(desktopId) {
@@ -187,7 +194,7 @@ Item {
         exclusionMode: ExclusionMode.Auto
         mask: Region { item: dockCard }
 
-        BorderSurface {
+        Rectangle {
             id: dockCard
             x: {
                 if (root.position === "left") return Style.space(12);
@@ -200,26 +207,63 @@ Item {
                 return (parent.height - height) / 2;
             }
             width: {
-                if (root.isVertical) return root.iconSize + root.padding * 2 + borderLeft + borderRight;
-                return rowLayout.implicitWidth + root.padding * 2 + borderLeft + borderRight;
+                if (root.isVertical) return rowLayout.implicitWidth;
+                return omarchyIcon.width + rowLayout.implicitWidth;
             }
             height: {
-                if (root.isVertical) return colLayout.implicitHeight + root.padding * 2 + borderTop + borderBottom;
-                return root.iconSize + root.padding * 2 + borderTop + borderBottom;
+                if (root.isVertical) return omarchyIcon.height + rowLayout.implicitHeight;
+                return Math.max(omarchyIcon.implicitHeight, rowLayout.implicitHeight);
             }
+            radius: root.radius
+            color: Util.alpha(Color.background, root.opacity_)
             border.width: 0
-            padding: root.padding
-            color: Color.popups.background
 
             MouseArea {
                 anchors.fill: parent
                 hoverEnabled: true
             }
 
+            // Omarchy logo — always first, always pinned, not removable
+            Item {
+                id: omarchyIcon
+                width: root.iconSize
+                height: root.iconSize
+                anchors.verticalCenter: root.isVertical ? undefined : parent.verticalCenter
+                anchors.horizontalCenter: root.isVertical ? parent.horizontalCenter : undefined
+                x: root.isVertical ? 0 : root.padding
+                y: root.isVertical ? root.padding : 0
+
+                Rectangle {
+                    anchors.fill: parent
+                    radius: 10
+                    color: omarchyMouse.containsMouse ? Util.alpha(Color.accent, 0.15) : "transparent"
+                    border.width: 0
+                }
+
+                Image {
+                    anchors.centerIn: parent
+                    width: root.iconSize - 16
+                    height: width
+                    source: "/usr/share/omarchy/logo.svg"
+                    fillMode: Image.PreserveAspectFit
+                    smooth: true
+                }
+
+                MouseArea {
+                    id: omarchyMouse
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    acceptedButtons: Qt.LeftButton
+                    onClicked: menuProc.running = true
+                }
+            }
+
             Row {
                 id: rowLayout
                 visible: !root.isVertical
-                anchors.centerIn: parent
+                anchors.verticalCenter: parent.verticalCenter
+                anchors.left: omarchyIcon.right
+                anchors.leftMargin: root.spacing
                 spacing: root.spacing
 
                 Repeater {
@@ -246,7 +290,7 @@ Item {
                     visible: root.hasSeparator()
                     width: 1; height: root.iconSize * 0.6
                     anchors.verticalCenter: parent.verticalCenter
-                    color: Util.alpha(Color.popups.text, 0.16)
+                    color: Util.alpha(Color.foreground, 0.2)
                     radius: 1
                 }
 
@@ -276,7 +320,7 @@ Item {
                         id: phText
                         anchors.centerIn: parent
                         text: "Pin an app to begin"
-                        color: Util.alpha(Color.popups.text, 0.55)
+                        color: Util.alpha(Color.foreground, 0.55)
                         font.family: Style.font.family
                         font.pixelSize: Style.font.body
                     }
@@ -286,7 +330,9 @@ Item {
             Column {
                 id: colLayout
                 visible: root.isVertical
-                anchors.centerIn: parent
+                anchors.horizontalCenter: parent.horizontalCenter
+                anchors.top: omarchyIcon.bottom
+                anchors.topMargin: root.spacing
                 spacing: root.spacing
 
                 Repeater {
@@ -313,7 +359,7 @@ Item {
                     visible: root.hasSeparator()
                     width: root.iconSize * 0.6; height: 1
                     anchors.horizontalCenter: parent.horizontalCenter
-                    color: Util.alpha(Color.popups.text, 0.16)
+                    color: Util.alpha(Color.foreground, 0.2)
                     radius: 1
                 }
 
@@ -362,11 +408,17 @@ Item {
 
             MouseArea { anchors.fill: parent; onClicked: ctxMenu.visible = false }
 
-            BorderSurface {
+            Rectangle {
                 x: ctxMenu.openAt.x; y: ctxMenu.openAt.y
-                border.width: 0; padding: root.padding; color: Color.popups.background
+                width: ctxCol.implicitWidth + root.padding * 2
+                height: ctxCol.implicitHeight + root.padding * 2
+                radius: 6
+                color: Util.alpha(Color.background, 0.95)
+                border.width: 0
 
                 Column {
+                    id: ctxCol
+                    anchors.centerIn: parent
                     spacing: 2
                     CtxMenuItem {
                         text: "Unpin"
@@ -403,13 +455,22 @@ Item {
             WlrLayershell.exclusionMode: ExclusionMode.Ignore
             mask: Region { item: null }
 
-            MouseArea { anchors.fill: parent; onClicked: settingsPanel.visible = false }
+            MouseArea {
+                anchors.fill: parent
+                z: 1
+                onClicked: settingsPanel.visible = false
+            }
 
-            BorderSurface {
+            Rectangle {
                 anchors.centerIn: parent
-                width: settingsCol.implicitWidth + root.padding * 4
-                height: settingsCol.implicitHeight + root.padding * 4
-                border.width: 0; padding: root.padding; color: Color.popups.background
+                width: settingsCol.implicitWidth + root.padding * 6
+                height: settingsCol.implicitHeight + root.padding * 6
+                radius: root.radius
+                color: Util.alpha(Color.background, 0.95)
+                border.width: 0
+                z: 2
+
+                MouseArea { anchors.fill: parent }
 
                 Column {
                     id: settingsCol
@@ -460,7 +521,24 @@ Item {
 
                     PanelSeparator {}
 
-                    Item { width: 1; height: 1 }
+                    // Close button
+                    Rectangle {
+                        width: parent.width; height: 32; radius: 6
+                        color: closeMouse.containsMouse ? Util.alpha(Color.accent, 0.18) : "transparent"
+                        Text {
+                            anchors.centerIn: parent
+                            text: "Close"
+                            color: Color.foreground
+                            font.family: Style.font.family
+                            font.pixelSize: Style.font.body
+                        }
+                        MouseArea {
+                            id: closeMouse
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            onClicked: settingsPanel.visible = false
+                        }
+                    }
                 }
             }
         }

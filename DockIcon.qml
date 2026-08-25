@@ -23,7 +23,7 @@ Item {
     Rectangle {
         anchors.fill: parent
         radius: 10
-        color: iconMouse.containsMouse ? Util.alpha(Color.accent, 0.18) : "transparent"
+        color: iconMouse.containsMouse ? Util.alpha("#ffffff", 0.15) : "transparent"
         border.width: 0
     }
 
@@ -41,15 +41,15 @@ Item {
         smooth: true
     }
 
+    // Running indicator — matches nwg-dock-hyprland style
     Rectangle {
         visible: iconRoot.isRunning
-        width: 6; height: 6; radius: 3
+        width: iconRoot.iconSize * 0.4; height: 1
         anchors.horizontalCenter: parent.horizontalCenter
         anchors.bottom: parent.bottom
         anchors.bottomMargin: 2
-        color: Color.accent
-        border.color: Util.alpha(Color.background, 0.9)
-        border.width: 1
+        color: Util.alpha("#ffffff", 0.2)
+        radius: 1
     }
 
     MouseArea {
