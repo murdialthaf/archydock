@@ -15,17 +15,49 @@ Item {
     property int iconSize: 48
     property int spacing: 2
     property int padding: 8
+    property var pinnedIds: []
+    property var savedData: ({})
 
     readonly property var toplevels: ToplevelManager.toplevels ? ToplevelManager.toplevels.values : []
     readonly property var apps: DesktopEntries.applications ? DesktopEntries.applications.values : []
-    readonly property var pinnedIds: loadPins()
 
-    // Running apps mapped to desktopId
     property var runningMap: ({})
 
+    function configPath() {
+        var base = Quickshell.env("XDG_CONFIG_HOME") || (Quickshell.env("HOME") + "/.config")
+        return base + "/archydock.json"
+    }
+
+    FileView {
+        id: configFile
+        path: root.configPath()
+        onLoaded: {
+            try {
+                var data = JSON.parse(content)
+                root.savedData = data
+                if (data.pinned) root.pinnedIds = data.pinned
+                if (data.position) root.position = data.position
+                if (data.iconSize) root.iconSize = data.iconSize
+                if (data.spacing !== undefined) root.spacing = data.spacing
+                if (data.opened !== undefined) root.opened = data.opened
+            } catch (e) {}
+        }
+        onFileChanged: reload()
+    }
+
+    function saveConfig() {
+        savedData.pinned = pinnedIds
+        savedData.position = position
+        savedData.iconSize = iconSize
+        savedData.spacing = spacing
+        savedData.opened = opened
+        var req = new XMLHttpRequest()
+        req.open("PUT", "file://" + configPath(), false)
+        req.send(JSON.stringify(savedData, null, 2))
+    }
+
     function appIdForToplevel(tl) {
-        var appId = tl.appId || ""
-        return appId
+        return tl.appId || ""
     }
 
     function updateRunning() {
@@ -56,52 +88,6 @@ Item {
         return entry.icon || "application-x-executable"
     }
 
-    function iconSource(iconName) {
-        var v = iconName || "application-x-executable"
-        return "image://icon/" + v
-    }
-
-    function loadPins() {
-        try {
-            var req = new XMLHttpRequest()
-            req.open("GET", "file://" + root.configPath(), false)
-            req.send()
-            if (req.status === 200 && req.responseText) {
-                var data = JSON.parse(req.responseText)
-                return data.pinned || []
-            }
-        } catch (e) {}
-        return []
-    }
-
-    property var savedData: ({})
-
-    function configPath() {
-        return (Quickshell.env("XDG_CONFIG_HOME") || Quickshell.env("HOME") + "/.config") + "/archydock.json"
-    }
-
-    function saveConfig() {
-        savedData.pinned = pinnedIds
-        savedData.position = position
-        savedData.iconSize = iconSize
-        savedData.spacing = spacing
-        savedData.opened = opened
-        var req = new XMLHttpRequest()
-        req.open("PUT", "file://" + configPath(), false)
-        req.send(JSON.stringify(savedData, null, 2))
-    }
-
-    FileView {
-        path: root.configPath()
-        onLoaded: {
-            try {
-                var data = JSON.parse(content)
-                if (data.pinned) root.savedData = data
-            } catch (e) {}
-        }
-        onFileChanged: reload()
-    }
-
     Process {
         id: launchProc
         property string pendingDesktopId: ""
@@ -113,8 +99,6 @@ Item {
         }
     }
 
-    Process { id: focusProc }
-
     function launchApp(desktopId) {
         launchProc.pendingDesktopId = desktopId
         launchProc.command = ["gtk-launch", desktopId]
@@ -125,7 +109,7 @@ Item {
         if (pinnedIds.indexOf(desktopId) !== -1) return
         var next = pinnedIds.slice()
         next.push(desktopId)
-        savedData.pinned = next
+        pinnedIds = next
         saveConfig()
     }
 
@@ -134,7 +118,7 @@ Item {
         for (var i = 0; i < pinnedIds.length; i++) {
             if (pinnedIds[i] !== desktopId) next.push(pinnedIds[i])
         }
-        savedData.pinned = next
+        pinnedIds = next
         saveConfig()
     }
 
@@ -142,7 +126,7 @@ Item {
         var next = pinnedIds.slice()
         var item = next.splice(from, 1)[0]
         next.splice(to, 0, item)
-        savedData.pinned = next
+        pinnedIds = next
         saveConfig()
     }
 
