@@ -16,7 +16,8 @@ Item {
     property int spacing: 4
     property int padding: 5
     property int radius: 11
-    property real opacity_: 0.8
+    property color dockColor: "#272424"
+    property real dockOpacity: 0.8
     property var pinnedIds: []
     property var savedData: ({})
 
@@ -215,7 +216,8 @@ Item {
                 return Math.max(omarchyIcon.implicitHeight, rowLayout.implicitHeight);
             }
             radius: root.radius
-            color: Util.alpha(Color.background, root.opacity_)
+            color: Util.alpha(root.dockColor, 0.5)
+            opacity: root.dockOpacity
             border.width: 0
 
             MouseArea {
@@ -469,8 +471,6 @@ Item {
                 color: Util.alpha(Color.background, 0.95)
                 border.width: 0
                 z: 2
-
-                MouseArea { anchors.fill: parent }
 
                 Column {
                     id: settingsCol
