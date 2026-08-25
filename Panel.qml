@@ -209,7 +209,7 @@ Item {
             }
             border.width: 0
             padding: root.padding
-            color: Color.elevated
+            color: Color.popups.background
 
             MouseArea {
                 anchors.fill: parent
@@ -364,7 +364,7 @@ Item {
 
             BorderSurface {
                 x: ctxMenu.openAt.x; y: ctxMenu.openAt.y
-                border.width: 0; padding: root.padding; color: Color.elevated
+                border.width: 0; padding: root.padding; color: Color.popups.background
 
                 Column {
                     spacing: 2
@@ -409,7 +409,7 @@ Item {
                 anchors.centerIn: parent
                 width: settingsCol.implicitWidth + root.padding * 4
                 height: settingsCol.implicitHeight + root.padding * 4
-                border.width: 0; padding: root.padding; color: Color.elevated
+                border.width: 0; padding: root.padding; color: Color.popups.background
 
                 Column {
                     id: settingsCol
@@ -449,10 +449,10 @@ Item {
 
                     PanelSeparator {}
 
-                    ToggleSwitch {
+                    Toggle {
                         label: "Enabled"
                         checked: root.opened
-                        onToggled: {
+                        onClicked: {
                             root.opened = !root.opened
                             root.saveConfig()
                         }
