@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.murdialthaf.archydock",
+  "name": "ArchyDock",
+  "version": "0.2.0",
+  "author": "murdialthaf",
+  "license": "MIT",
+  "description": "Modern dock for Hyprland/Omarchy — correct .desktop identification, draggable pins, and GUI settings. Inspired by nwg-dock-hyprland, built for Quickshell.",
+  "kinds": ["panel"],
+  "keepLoaded": true,
+  "entryPoints": {
+    "panel": "Panel.qml"
+  }
+}
