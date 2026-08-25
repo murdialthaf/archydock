@@ -421,7 +421,7 @@ Item {
                     ButtonGroup {
                         options: ["Bottom", "Top", "Left", "Right"]
                         value: root.position.charAt(0).toUpperCase() + root.position.slice(1)
-                        changed: function(val) {
+                        onChanged: function(val) {
                             root.position = val.toLowerCase()
                             root.saveConfig()
                         }
@@ -433,8 +433,8 @@ Item {
                     PanelSlider {
                         value: root.iconSize
                         minimum: 32; maximum: 96; step: 4
-                        moved: function(val) { root.iconSize = val }
-                        released: function(val) { root.iconSize = val; root.saveConfig() }
+                        onMoved: function(val) { root.iconSize = val }
+                        onReleased: function(val) { root.iconSize = val; root.saveConfig() }
                     }
 
                     PanelSeparator {}
@@ -443,8 +443,8 @@ Item {
                     PanelSlider {
                         value: root.spacing
                         minimum: 0; maximum: 12; step: 1
-                        moved: function(val) { root.spacing = val }
-                        released: function(val) { root.spacing = val; root.saveConfig() }
+                        onMoved: function(val) { root.spacing = val }
+                        onReleased: function(val) { root.spacing = val; root.saveConfig() }
                     }
 
                     PanelSeparator {}
