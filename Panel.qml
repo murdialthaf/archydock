@@ -3,570 +3,388 @@ import Quickshell
 import Quickshell.Io
 import Quickshell.Wayland
 import qs.Commons
-import qs.Ui
-import "DockModel.js" as DockModel
+import qs.Services
+import qs.Windows
+import qs.Components
+import "archydock.js" as JS
 
-// ArchyDock v0.2.0 — persistent dock panel for Hyprland/Omarchy
-// Features: correct .desktop identification, draggable pins, progressive
-// icon fallback, all 4 dock positions, GUI settings, launcher button.
-Item {
+PanelWindow {
     id: root
-
-    property var shell: null
-
-    // Persisted state
-    property var pinnedIds: []
-    property var learnedMap: ({})
-    property var runningApps: []
-
-    // Appearance
-    property int iconSize: 44
-    property int spacing: 8
-    property int padding: 12
-    property int radius: 18
-    property bool autohide: false
-    property string position: "bottom"
-
-    // Launcher
-    property string launcherDesktop: "nwg-drawer.desktop"
-    property string launcherIconName: "view-app-grid-symbolic"
-
-    // Runtime
     property bool opened: true
+    property string position: (settings.position || "bottom").toLowerCase()
     property bool isVertical: position === "left" || position === "right"
+    property int iconSize: settings.iconSize ?? 48
+    property int spacing: settings.spacing ?? 2
 
-    function open(payloadJson) {
-        try {
-            var p = JSON.parse(payloadJson || "{}");
-            if (p.pins) pinnedIds = p.pins;
-        } catch (e) {}
-        opened = true;
-    }
-    function close() { opened = false; }
-    function toggle() { opened = !opened; }
-
-    // ------------------------------------------------------------------ Ipc
-    IpcHandler {
-        target: "archydock"
-        function open(payloadJson: string): string { root.open(payloadJson); return "ok"; }
-        function close(): string { root.close(); return "ok"; }
-        function toggle(): string { root.toggle(); return root.opened ? "open" : "closed"; }
-        function state(): string { return root.opened ? "open" : "closed"; }
-        function pins(): string { return JSON.stringify(root.pinnedIds); }
-        function pin(id: string): string {
-            var next = DockModel.togglePin(root.pinnedIds, id);
-            root.pinnedIds = next; savePins();
-            return JSON.stringify(next);
+    readonly property var settings: ArchydockSettings
+    readonly property var desktopIndex: DesktopEntries.index
+    readonly property var pinnedIds: root.settings.pinned ?? []
+    readonly property var runningApps: HyprlandState.toplevels?.values ?? []
+    readonly property var unpinnedRunning: {
+        var pinneds = {};
+        for (var i = 0; i < pinnedIds.length; i++) pinneds[pinnedIds[i]] = true;
+        var result = [];
+        for (var j = 0; j < runningApps.length; j++) {
+            var a = runningApps[j];
+            if (!a || !a.desktopId) continue;
+            if (!pinneds[a.desktopId]) result.push(a);
         }
-        function reorder(from: int, to: int): string {
-            var next = DockModel.movePin(root.pinnedIds, from, to);
-            root.pinnedIds = next; savePins();
-            return JSON.stringify(next);
-        }
-        function ping(): string { return "ok"; }
+        return result;
+    }
+    readonly property string launcherDesktop: settings.launcher ?? "org.gnome.Nautilus.desktop"
+    readonly property string launcherIconName: {
+        var entry = desktopIndex.byPath[launcherDesktop];
+        return (entry && entry.icon) || "system-file-manager";
     }
 
-    // ------------------------------------------------------------ persistence
-    Process {
-        id: ensureConfigDir
-        command: ["bash","-lc","mkdir -p \"$HOME/.config/archydock\""]
-    }
-
-    FileView {
-        id: configFile
-        path: Quickshell.env("HOME") + "/.config/archydock/config.json"
-        watchChanges: true
-        onFileChanged: reloadConfig()
-        onLoaded: reloadConfig()
-        onLoadFailed: function(err) {
-            if (String(err).indexOf("No such file") !== -1) {
-                ensureConfigDir.running = true;
-                saveTimer.restart();
-            }
-        }
-    }
-
-    Timer { id: saveTimer; interval: 120; repeat: false; onTriggered: savePins() }
-
-    function reloadConfig() {
-        try {
-            var txt = configFile.text();
-            if (!txt) return;
-            var obj = JSON.parse(txt);
-            if (Array.isArray(obj.pinnedIds)) pinnedIds = obj.pinnedIds.slice();
-            if (obj.learnedMap && typeof obj.learnedMap === "object") learnedMap = obj.learnedMap;
-            if (obj.iconSize) iconSize = obj.iconSize;
-            if (obj.spacing !== undefined) spacing = obj.spacing;
-            if (obj.padding !== undefined) padding = obj.padding;
-            if (obj.radius !== undefined) radius = obj.radius;
-            if (obj.position) position = obj.position;
-            if (obj.autohide !== undefined) autohide = obj.autohide;
-            if (obj.launcherDesktop) launcherDesktop = obj.launcherDesktop;
-        } catch (e) { console.warn("ArchyDock: bad config.json", e); }
-    }
+    color: "transparent"
+    implicitWidth: 10
+    implicitHeight: 10
+    visible: root.opened
+    anchors { top: true; bottom: true; left: true; right: true }
+    WlrLayershell.layer: WlrLayer.Background
+    WlrLayershell.exclusionMode: ExclusionMode.Ignore
+    mask: Region { item: null }
 
     function savePins() {
-        ensureConfigDir.running = true;
-        var payload = JSON.stringify({
-            pinnedIds: pinnedIds,
-            learnedMap: learnedMap,
-            iconSize: iconSize,
-            spacing: spacing,
-            padding: padding,
-            radius: radius,
-            position: position,
-            autohide: autohide,
-            launcherDesktop: launcherDesktop
-        }, null, 2);
-        Qt.callLater(function(){ configFile.setText(payload); });
+        root.settings.pinned = root.pinnedIds;
+        settingsStub.settingsData = JSON.stringify(root.settings, null, 2);
+        settingsStub.reload();
     }
 
-    // ----------------------------------------------------------- desktop index
-    property var desktopIndex: ({ byId: {}, byWmClass: {}, byExec: {} })
-    property var desktopEntries: []
-    property bool desktopReady: false
+    function launchDesktop(desktopId) {
+        var entry = desktopIndex.byId[desktopId];
+        if (entry && entry.path) {
+            launchProc.command = [entry.path];
+            launchProc.running = true;
+            noteLaunch(desktopId, 0);
+            return;
+        }
+        var base = desktopId.replace(/\.desktop$/, "");
+        launchProc.command = ["gtk-launch", base];
+        launchProc.running = true;
+        noteLaunch(desktopId, 0);
+    }
 
-    Process {
-        id: desktopScanProc
-        command: ["bash", "-lc",
-            "set -o pipefail; "
-          + "dirs=\"${XDG_DATA_HOME:-$HOME/.local/share}/applications\"; "
-          + "IFS=: read -ra _dirs <<< \"${XDG_DATA_DIRS:-/usr/local/share:/usr/share}\"; "
-          + "for d in \"${_dirs[@]}\"; do dirs+=\" $d/applications\"; done; "
-          + "dirs+=\" /var/lib/flatpak/exports/share/applications $HOME/.local/share/flatpak/exports/share/applications\"; "
-          + "cnt=0; for d in $dirs; do [ -d \"$d\" ] || continue; "
-          + "for f in \"$d\"/*.desktop; do [ -f \"$f\" ] || continue; "
-          + "id=$(basename \"$f\"); "
-          + "name=$(grep -m1 '^Name=' \"$f\" 2>/dev/null | cut -d= -f2- | tr -d '|' | head -c 80); "
-          + "execv=$(grep -m1 '^Exec=' \"$f\" 2>/dev/null | cut -d= -f2- | tr -d '|' | head -c 180); "
-          + "icon=$(grep -m1 '^Icon=' \"$f\" 2>/dev/null | cut -d= -f2- | tr -d '|' | head -c 120); "
-          + "wm=$(grep -m1 '^StartupWMClass=' \"$f\" 2>/dev/null | cut -d= -f2- | tr -d '|' | head -c 80); "
-          + "nodisp=$(grep -m1 '^NoDisplay=' \"$f\" 2>/dev/null | cut -d= -f2-); "
-          + "hidden=$(grep -m1 '^Hidden=' \"$f\" 2>/dev/null | cut -d= -f2-); "
-          + "echo \"$id|$name|$execv|$icon|$wm|$nodisp|$hidden\"; "
-          + "cnt=$((cnt+1)); [ $cnt -ge 500 ] && break 2; "
-          + "done; done | head -n 600"
-        ]
-        stdout: StdioCollector {
-            onStreamFinished: {
-                var lines = (text || "").trim().split("\n").filter(function(x){ return x.length>0; });
-                var entries = [];
-                for (var i=0;i<lines.length;i++) {
-                    var parts = lines[i].split("|");
-                    if (parts.length < 7) continue;
-                    var id = parts[0];
-                    if (!id || id.indexOf(".desktop")===-1) continue;
-                    entries.push({
-                        id: id,
-                        name: parts[1] || id.replace(".desktop",""),
-                        exec: parts[2] || "",
-                        tryExec: "",
-                        icon: parts[3] || "",
-                        startupWmClass: parts[4] || "",
-                        noDisplay: String(parts[5]).toLowerCase()==="true",
-                        hidden: String(parts[6]).toLowerCase()==="true",
-                        path: id
-                    });
-                }
-                desktopEntries = entries;
-                desktopIndex = DockModel.buildIndex(entries);
-                desktopReady = true;
-                recomputeRunning();
+    function noteLaunch(desktopId, code) {
+        if (code !== 0) return;
+        var pinArr = root.pinnedIds;
+        for (var k = 0; k < pinArr.length; k++) {
+            if (pinArr[k] === desktopId) return;
+        }
+        var pinned = root.pinnedIds;
+        pinned.push(desktopId);
+        root.pinnedIds = pinned;
+        savePins();
+    }
+
+    QsProcess { id: focusProc; }
+
+    QsProcess {
+        id: launchProc
+        onRunningChanged: {
+            if (!running && desktopId != null) noteLaunch(desktopId, exitCode);
+            function noteLaunch(desktopId, code) {
+                if (code !== 0) return;
+                var pinned = root.pinnedIds;
+                pinned.push(desktopId);
+                root.pinnedIds = pinned;
+                savePins();
             }
         }
-        stderr: StdioCollector { onStreamFinished: { if (text) console.warn("ArchyDock desktop scan:", text.slice(0,400)); } }
     }
 
-    // -------------------------------------------------------------- Hyprland
-    property var hyprClients: []
-    property string hyprError: ""
+    SignalShortcut {
+        name: "archydock-toggle"
+        onPressed: root.opened = !root.opened
+    }
 
-    Process {
-        id: hyprProc
-        command: ["hyprctl", "-j", "clients"]
-        stdout: StdioCollector {
-            onStreamFinished: {
+    SettingsStub {
+        id: settingsStub
+        name: "archydock"
+        path: "archydock.json"
+
+        Component.onCompleted: {
+            reload();
+            settingsStub.readConfig();
+            var data = settingsStub.readConfig();
+            if (typeof data === "string" && data.length > 0) {
                 try {
-                    var arr = JSON.parse(text || "[]");
-                    hyprError = "";
-                    var next = [];
-                    for (var i=0;i<arr.length;i++) {
-                        var c = arr[i];
-                        if (!c.mapped || c.hidden) continue;
-                        next.push({
-                            appId: c.class || "",
-                            initialClass: c.initialClass || c.class || "",
-                            title: c.title || "",
-                            pid: c.pid || 0,
-                            xwayland: !!c.xwayland,
-                            address: c.address || ""
-                        });
+                    var parsed = JSON.parse(data);
+                    for (var key in parsed) {
+                        if (parsed.hasOwnProperty(key)) {
+                            root.settings[key] = parsed[key];
+                        }
                     }
-                    hyprClients = next;
-                    recomputeRunning();
-                } catch (e) { hyprError = String(e).slice(0,120); console.warn("ArchyDock: hyprctl parse", e, text ? text.slice(0,300) : ""); }
+                } catch (e) {}
             }
         }
-        stderr: StdioCollector { onStreamFinished: { if (text) { hyprError = text.slice(0,120); console.warn("ArchyDock hyprctl:", text.slice(0,400)); } } }
+
+        onFileChanged: {
+            var data = settingsStub.readConfig();
+            if (typeof data === "string" && data.length > 0) {
+                try {
+                    var parsed = JSON.parse(data);
+                    for (var key in parsed) {
+                        if (parsed.hasOwnProperty(key)) {
+                            root.settings[key] = parsed[key];
+                        }
+                    }
+                } catch (e) {}
+            }
+        }
     }
 
-    Process {
-        id: hyprCheckProc
-        command: ["bash","-lc","command -v hyprctl >/dev/null 2>&1 && hyprctl -j clients >/dev/null 2>&1 && echo ok || echo missing"]
-        stdout: StdioCollector { onStreamFinished: {
-                if ((text||"").trim() !== "ok") {
-                    hyprError = "hyprctl not found — dock shows pinned apps only";
-                    console.warn("ArchyDock:", hyprError);
+    // ----------------------------------------------------------- dock card
+    BorderSurface {
+        id: dockCard
+        x: {
+            if (root.position === "left") return Style.space(12);
+            if (root.position === "right") return parent.width - width - Style.space(12);
+            return (parent.width - width) / 2;
+        }
+        y: {
+            if (root.position === "bottom") return parent.height - height - Style.space(12);
+            if (root.position === "top") return Style.space(12);
+            return (parent.height - height) / 2;
+        }
+        width: {
+            if (root.isVertical) return root.iconSize + root.padding * 2 + borderLeft + borderRight;
+            return rowLayout.implicitWidth + root.padding * 2 + borderLeft + borderRight;
+        }
+        height: {
+            if (root.isVertical) return colLayout.implicitHeight + root.padding * 2 + borderTop + borderBottom;
+            return root.iconSize + root.padding * 2 + borderTop + borderBottom;
+        }
+        border.width: 0
+        padding: root.padding
+        color: Color.elevated
+
+        MouseArea {
+            anchors.fill: parent
+            hoverEnabled: true
+        }
+
+        Row {
+            id: rowLayout
+            visible: !root.isVertical
+            anchors.centerIn: parent
+            spacing: root.spacing
+
+            Repeater {
+                model: root.pinnedIds
+                delegate: DockIcon {
+                    desktopId: modelData
+                    iconName: {
+                        var entry = root.desktopIndex.byId[modelData];
+                        return (DockModel.iconCandidates(entry, null)[0]) || "application-x-executable";
+                    }
+                    isRunning: {
+                        for (var i=0;i<root.runningApps.length;i++) if (root.runningApps[i].desktopId === modelData) return true;
+                        return false;
+                    }
+                    isPinned: true
+                    iconSize: root.iconSize
+                    onClicked: {
+                        for (var i=0;i<root.runningApps.length;i++) if (root.runningApps[i].desktopId === desktopId) {
+                            focusProc.command = ["hyprctl","dispatch","focuswindow","address:" + root.runningApps[i].address];
+                            focusProc.running = true; return;
+                        }
+                        launchDesktop(desktopId);
+                    }
+                    onRightClicked: contextMenu.openFor(desktopId, mapToGlobal(0,0))
+                    dragIndex: index
+                    onDragMove: function(from,to){
+                        var next = DockModel.movePin(root.pinnedIds, from, to);
+                        root.pinnedIds = next; savePins();
+                    }
                 }
             }
-        }
-    }
 
-    // Derived filtered model
-    property var unpinnedRunning: []
-
-    function updateUnpinned() {
-        var out = [];
-        for (var i=0;i<runningApps.length;i++) if (pinnedIds.indexOf(runningApps[i].desktopId)===-1) out.push(runningApps[i]);
-        unpinnedRunning = out;
-    }
-    onRunningAppsChanged: updateUnpinned()
-    onPinnedIdsChanged: updateUnpinned()
-
-    Timer {
-        id: pollTimer
-        interval: 900
-        repeat: true
-        running: root.opened
-        onTriggered: hyprProc.running = true
-        Component.onCompleted: { desktopScanProc.running = true; hyprProc.running = true; hyprCheckProc.running = true; }
-    }
-
-    // pidLedger
-    property var pidLedger: ({})
-    property var pidLedgerByDesktop: ({})
-
-    function noteLaunch(desktopId, pidHint) {
-        var now = Date.now();
-        pidLedgerByDesktop[desktopId] = now;
-    }
-
-    function recomputeRunning() {
-        if (!desktopReady) return;
-        var now = Date.now();
-        for (var k in pidLedgerByDesktop) {
-            if (now - pidLedgerByDesktop[k] > 8000) delete pidLedgerByDesktop[k];
-        }
-        var next = [];
-        var seen = {};
-        for (var i=0;i<hyprClients.length;i++) {
-            var w = hyprClients[i];
-            var did = DockModel.identify(w, desktopIndex, learnedMap, pidLedger, null);
-            if (did.indexOf("unknown-")===0) {
-                var best = null, bestAge = Infinity;
-                for (var ld in pidLedgerByDesktop) {
-                    var age = now - pidLedgerByDesktop[ld];
-                    if (age < bestAge) { bestAge = age; best = ld; }
+            Rectangle {
+                visible: {
+                    if (root.runningApps.length===0) return false;
+                    for (var i=0;i<root.runningApps.length;i++) {
+                        if (root.pinnedIds.indexOf(root.runningApps[i].desktopId)===-1) return true;
+                    }
+                    return false;
                 }
-                if (best && !seen[best]) did = best;
-            }
-            if (seen[did]) {
-                for (var g=0;g<next.length;g++) if (next[g].desktopId===did) { next[g].addresses.push(w.address); break; }
-                continue;
-            }
-            seen[did] = true;
-            var entry = desktopIndex.byId[did];
-            var iconCands = DockModel.iconCandidates(entry, w);
-            next.push({
-                desktopId: did,
-                appId: w.appId,
-                title: w.title,
-                address: w.address,
-                addresses: [w.address],
-                xwayland: w.xwayland,
-                iconName: iconCands[0] || "application-x-executable"
-            });
-        }
-        runningApps = next;
-    }
-
-    // ------------------------------------------------------------------ dock
-    PanelWindow {
-        id: dockWindow
-        visible: root.opened
-        anchors { top: true; bottom: true; left: true; right: true }
-        color: "transparent"
-        WlrLayershell.namespace: "archydock"
-        WlrLayershell.layer: WlrLayer.Top
-        WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
-        exclusionMode: ExclusionMode.Auto
-        mask: Region { item: dockCard }
-
-        BorderSurface {
-            id: dockCard
-            x: {
-                if (root.position === "left") return Style.space(12);
-                if (root.position === "right") return parent.width - width - Style.space(12);
-                return (parent.width - width) / 2;
-            }
-            y: {
-                if (root.position === "bottom") return parent.height - height - Style.space(12);
-                if (root.position === "top") return Style.space(12);
-                return (parent.height - height) / 2;
-            }
-            width: {
-                if (root.isVertical) return root.iconSize + root.padding * 2 + borderLeft + borderRight;
-                return layoutLoader.implicitWidth + root.padding * 2 + borderLeft + borderRight;
-            }
-            height: {
-                if (root.isVertical) return layoutLoader.implicitHeight + root.padding * 2 + borderTop + borderBottom;
-                return root.iconSize + root.padding * 2 + borderTop + borderBottom;
-            }
-            color: Util.alpha(Color.background, 0.92)
-            borderSpec: Border.surfaceSpec("popups", "border", Color.popups.border, Math.max(1, Style.space(1)))
-            radius: root.radius
-
-            // Right-click on background opens settings
-            MouseArea {
-                anchors.fill: parent
-                acceptedButtons: Qt.RightButton
-                onClicked: settingsContext.opened = true
-                z: -1
+                width: 1; height: root.iconSize * 0.6
+                anchors.verticalCenter: parent.verticalCenter
+                color: Util.alpha(Color.popups.text, 0.16)
+                radius: 1
             }
 
-            // Layout switches between Row (bottom/top) and Column (left/right)
-            Loader {
-                id: layoutLoader
-                anchors.centerIn: parent
-                active: true
-                sourceComponent: root.isVertical ? verticalLayout : horizontalLayout
-            }
-
-            Component {
-                id: horizontalLayout
-                Row {
-                    spacing: root.spacing
-
-                    Repeater {
-                        model: root.pinnedIds
-                        delegate: DockIcon {
-                            desktopId: modelData
-                            iconName: {
-                                var entry = root.desktopIndex.byId[modelData];
-                                return (DockModel.iconCandidates(entry, null)[0]) || "application-x-executable";
-                            }
-                            isRunning: {
-                                for (var i=0;i<root.runningApps.length;i++) if (root.runningApps[i].desktopId === modelData) return true;
-                                return false;
-                            }
-                            isPinned: true
-                            iconSize: root.iconSize
-                            onClicked: {
-                                for (var i=0;i<root.runningApps.length;i++) if (root.runningApps[i].desktopId === desktopId) {
-                                    focusProc.command = ["hyprctl","dispatch","focuswindow","address:" + root.runningApps[i].address];
-                                    focusProc.running = true; return;
-                                }
-                                launchDesktop(desktopId);
-                            }
-                            onRightClicked: contextMenu.openFor(desktopId, mapToGlobal(0,0))
-                            dragIndex: index
-                            onDragMove: function(from,to){
-                                var next = DockModel.movePin(root.pinnedIds, from, to);
-                                root.pinnedIds = next; savePins();
-                            }
-                        }
+            Repeater {
+                model: root.unpinnedRunning
+                delegate: DockIcon {
+                    desktopId: modelData.desktopId
+                    iconName: modelData.iconName
+                    isRunning: true
+                    isPinned: false
+                    iconSize: root.iconSize
+                    onClicked: {
+                        focusProc.command = ["hyprctl","dispatch","focuswindow","address:" + modelData.address];
+                        focusProc.running = true;
                     }
+                    onRightClicked: contextMenu.openFor(modelData.desktopId, mapToGlobal(0,0))
+                }
+            }
 
-                    Rectangle {
-                        visible: pinnedSeparatorVisible
-                        property bool pinnedSeparatorVisible: {
-                            if (root.runningApps.length===0) return false;
-                            for (var i=0;i<root.runningApps.length;i++) {
-                                if (root.pinnedIds.indexOf(root.runningApps[i].desktopId)===-1) return true;
-                            }
-                            return false;
-                        }
-                        width: 1; height: root.iconSize * 0.6
-                        anchors.verticalCenter: parent.verticalCenter
-                        color: Util.alpha(Color.popups.text, 0.16)
-                        radius: 1
-                    }
-
-                    Repeater {
-                        model: root.unpinnedRunning
-                        delegate: DockIcon {
-                            desktopId: modelData.desktopId
-                            iconName: modelData.iconName
-                            isRunning: true
-                            isPinned: false
-                            iconSize: root.iconSize
-                            onClicked: {
-                                focusProc.command = ["hyprctl","dispatch","focuswindow","address:" + modelData.address];
-                                focusProc.running = true;
-                            }
-                            onRightClicked: contextMenu.openFor(modelData.desktopId, mapToGlobal(0,0))
-                        }
-                    }
-
-                    // Launcher button
-                    Item {
-                        width: root.iconSize; height: root.iconSize
-                        Rectangle {
-                            anchors.fill: parent
-                            radius: 10
-                            color: launcherMouse.containsMouse ? Util.alpha(Color.accent, 0.18) : "transparent"
-                        }
-                        Image {
-                            anchors.centerIn: parent
-                            width: root.iconSize - 12; height: width
-                            source: "image://icon/" + root.launcherIconName
-                            fillMode: Image.PreserveAspectFit
-                            smooth: true
-                        }
-                        MouseArea {
-                            id: launcherMouse
-                            anchors.fill: parent
-                            hoverEnabled: true
-                            acceptedButtons: Qt.LeftButton | Qt.RightButton
-                            onClicked: function(ev) {
-                                if (ev.button === Qt.LeftButton) {
-                                    var base = root.launcherDesktop.replace(/\.desktop$/, "");
-                                    launchProc.command = ["gtk-launch", base];
-                                    launchProc.running = true;
-                                    noteLaunch(root.launcherDesktop, 0);
-                                } else if (ev.button === Qt.RightButton) {
-                                    settingsContext.opened = true;
-                                }
-                            }
-                        }
-                    }
-
-                    Item {
-                        visible: root.pinnedIds.length===0 && root.runningApps.length===0
-                        width: placeholder.width; height: placeholder.height
-                        Text {
-                            id: placeholder
-                            anchors.centerIn: parent
-                            text: "ArchyDock — pin an app to begin"
-                            color: Util.alpha(Color.popups.text, 0.55)
-                            font.family: Style.font.family
-                            font.pixelSize: Style.font.body
+            Item {
+                width: root.iconSize; height: root.iconSize
+                Rectangle {
+                    anchors.fill: parent
+                    radius: 10
+                    color: launcherMouse.containsMouse ? Util.alpha(Color.accent, 0.18) : "transparent"
+                }
+                Image {
+                    anchors.centerIn: parent
+                    width: root.iconSize - 12; height: width
+                    source: "image://icon/" + root.launcherIconName
+                    fillMode: Image.PreserveAspectFit
+                    smooth: true
+                }
+                MouseArea {
+                    id: launcherMouse
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    acceptedButtons: Qt.LeftButton | Qt.RightButton
+                    onClicked: function(ev) {
+                        if (ev.button === Qt.LeftButton) {
+                            var base = root.launcherDesktop.replace(/\.desktop$/, "");
+                            launchProc.command = ["gtk-launch", base];
+                            launchProc.running = true;
+                            noteLaunch(root.launcherDesktop, 0);
+                        } else if (ev.button === Qt.RightButton) {
+                            settingsContext.opened = true;
                         }
                     }
                 }
             }
 
-            Component {
-                id: verticalLayout
-                Column {
-                    spacing: root.spacing
+            Item {
+                visible: root.pinnedIds.length===0 && root.runningApps.length===0
+                width: placeholder.width; height: placeholder.height
+                Text {
+                    id: placeholder
+                    anchors.centerIn: parent
+                    text: "ArchyDock — pin an app to begin"
+                    color: Util.alpha(Color.popups.text, 0.55)
+                    font.family: Style.font.family
+                    font.pixelSize: Style.font.body
+                }
+            }
+        }
 
-                    Repeater {
-                        model: root.pinnedIds
-                        delegate: DockIcon {
-                            desktopId: modelData
-                            iconName: {
-                                var entry = root.desktopIndex.byId[modelData];
-                                return (DockModel.iconCandidates(entry, null)[0]) || "application-x-executable";
-                            }
-                            isRunning: {
-                                for (var i=0;i<root.runningApps.length;i++) if (root.runningApps[i].desktopId === modelData) return true;
-                                return false;
-                            }
-                            isPinned: true
-                            iconSize: root.iconSize
-                            onClicked: {
-                                for (var i=0;i<root.runningApps.length;i++) if (root.runningApps[i].desktopId === desktopId) {
-                                    focusProc.command = ["hyprctl","dispatch","focuswindow","address:" + root.runningApps[i].address];
-                                    focusProc.running = true; return;
-                                }
-                                launchDesktop(desktopId);
-                            }
-                            onRightClicked: contextMenu.openFor(desktopId, mapToGlobal(0,0))
-                            dragIndex: index
-                            onDragMove: function(from,to){
-                                var next = DockModel.movePin(root.pinnedIds, from, to);
-                                root.pinnedIds = next; savePins();
-                            }
+        Column {
+            id: colLayout
+            visible: root.isVertical
+            anchors.centerIn: parent
+            spacing: root.spacing
+
+            Repeater {
+                model: root.pinnedIds
+                delegate: DockIcon {
+                    desktopId: modelData
+                    iconName: {
+                        var entry = root.desktopIndex.byId[modelData];
+                        return (DockModel.iconCandidates(entry, null)[0]) || "application-x-executable";
+                    }
+                    isRunning: {
+                        for (var i=0;i<root.runningApps.length;i++) if (root.runningApps[i].desktopId === modelData) return true;
+                        return false;
+                    }
+                    isPinned: true
+                    iconSize: root.iconSize
+                    onClicked: {
+                        for (var i=0;i<root.runningApps.length;i++) if (root.runningApps[i].desktopId === desktopId) {
+                            focusProc.command = ["hyprctl","dispatch","focuswindow","address:" + root.runningApps[i].address];
+                            focusProc.running = true; return;
+                        }
+                        launchDesktop(desktopId);
+                    }
+                    onRightClicked: contextMenu.openFor(desktopId, mapToGlobal(0,0))
+                    dragIndex: index
+                    onDragMove: function(from,to){
+                        var next = DockModel.movePin(root.pinnedIds, from, to);
+                        root.pinnedIds = next; savePins();
+                    }
+                }
+            }
+
+            Rectangle {
+                visible: {
+                    if (root.runningApps.length===0) return false;
+                    for (var i=0;i<root.runningApps.length;i++) {
+                        if (root.pinnedIds.indexOf(root.runningApps[i].desktopId)===-1) return true;
+                    }
+                    return false;
+                }
+                width: root.iconSize * 0.6; height: 1
+                anchors.horizontalCenter: parent.horizontalCenter
+                color: Util.alpha(Color.popups.text, 0.16)
+                radius: 1
+            }
+
+            Repeater {
+                model: root.unpinnedRunning
+                delegate: DockIcon {
+                    desktopId: modelData.desktopId
+                    iconName: modelData.iconName
+                    isRunning: true
+                    isPinned: false
+                    iconSize: root.iconSize
+                    onClicked: {
+                        focusProc.command = ["hyprctl","dispatch","focuswindow","address:" + modelData.address];
+                        focusProc.running = true;
+                    }
+                    onRightClicked: contextMenu.openFor(modelData.desktopId, mapToGlobal(0,0))
+                }
+            }
+
+            Item {
+                width: root.iconSize; height: root.iconSize
+                Rectangle {
+                    anchors.fill: parent
+                    radius: 10
+                    color: launcherMouseV.containsMouse ? Util.alpha(Color.accent, 0.18) : "transparent"
+                }
+                Image {
+                    anchors.centerIn: parent
+                    width: root.iconSize - 12; height: width
+                    source: "image://icon/" + root.launcherIconName
+                    fillMode: Image.PreserveAspectFit
+                    smooth: true
+                }
+                MouseArea {
+                    id: launcherMouseV
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    acceptedButtons: Qt.LeftButton | Qt.RightButton
+                    onClicked: function(ev) {
+                        if (ev.button === Qt.LeftButton) {
+                            var base = root.launcherDesktop.replace(/\.desktop$/, "");
+                            launchProc.command = ["gtk-launch", base];
+                            launchProc.running = true;
+                            noteLaunch(root.launcherDesktop, 0);
+                        } else if (ev.button === Qt.RightButton) {
+                            settingsContext.opened = true;
                         }
                     }
+                }
+            }
 
-                    Rectangle {
-                        visible: pinnedSeparatorVisible
-                        property bool pinnedSeparatorVisible: {
-                            if (root.runningApps.length===0) return false;
-                            for (var i=0;i<root.runningApps.length;i++) {
-                                if (root.pinnedIds.indexOf(root.runningApps[i].desktopId)===-1) return true;
-                            }
-                            return false;
-                        }
-                        width: root.iconSize * 0.6; height: 1
-                        anchors.horizontalCenter: parent.horizontalCenter
-                        color: Util.alpha(Color.popups.text, 0.16)
-                        radius: 1
-                    }
-
-                    Repeater {
-                        model: root.unpinnedRunning
-                        delegate: DockIcon {
-                            desktopId: modelData.desktopId
-                            iconName: modelData.iconName
-                            isRunning: true
-                            isPinned: false
-                            iconSize: root.iconSize
-                            onClicked: {
-                                focusProc.command = ["hyprctl","dispatch","focuswindow","address:" + modelData.address];
-                                focusProc.running = true;
-                            }
-                            onRightClicked: contextMenu.openFor(modelData.desktopId, mapToGlobal(0,0))
-                        }
-                    }
-
-                    // Launcher button (vertical)
-                    Item {
-                        width: root.iconSize; height: root.iconSize
-                        Rectangle {
-                            anchors.fill: parent
-                            radius: 10
-                            color: launcherMouseV.containsMouse ? Util.alpha(Color.accent, 0.18) : "transparent"
-                        }
-                        Image {
-                            anchors.centerIn: parent
-                            width: root.iconSize - 12; height: width
-                            source: "image://icon/" + root.launcherIconName
-                            fillMode: Image.PreserveAspectFit
-                            smooth: true
-                        }
-                        MouseArea {
-                            id: launcherMouseV
-                            anchors.fill: parent
-                            hoverEnabled: true
-                            acceptedButtons: Qt.LeftButton | Qt.RightButton
-                            onClicked: function(ev) {
-                                if (ev.button === Qt.LeftButton) {
-                                    var base = root.launcherDesktop.replace(/\.desktop$/, "");
-                                    launchProc.command = ["gtk-launch", base];
-                                    launchProc.running = true;
-                                    noteLaunch(root.launcherDesktop, 0);
-                                } else if (ev.button === Qt.RightButton) {
-                                    settingsContext.opened = true;
-                                }
-                            }
-                        }
-                    }
-
-                    Item {
-                        visible: root.pinnedIds.length===0 && root.runningApps.length===0
-                        width: placeholderV.width; height: placeholderV.height
-                        Text {
-                            id: placeholderV
-                            anchors.centerIn: parent
-                            text: "ArchyDock"
-                            color: Util.alpha(Color.popups.text, 0.55)
-                            font.family: Style.font.family
-                            font.pixelSize: Style.font.caption
-                        }
-                    }
+            Item {
+                visible: root.pinnedIds.length===0 && root.runningApps.length===0
+                width: placeholderV.width; height: placeholderV.height
+                Text {
+                    id: placeholderV
+                    anchors.centerIn: parent
+                    text: "ArchyDock"
+                    color: Util.alpha(Color.popups.text, 0.55)
+                    font.family: Style.font.family
+                    font.pixelSize: Style.font.caption
                 }
             }
         }
@@ -575,408 +393,299 @@ Item {
     // ----------------------------------------------------------- context menu
     Item {
         id: contextMenu
-        property string targetId: ""
-        property var targetGlobalPos: null
-        property bool opened: false
-        function openFor(id, globalPos) {
-            targetId = id;
-            targetGlobalPos = globalPos;
-            opened = true;
-            closeTimer.restart();
+        visible: false
+
+        required property string desktopId
+        property point openAt
+
+        function openFor(desktopId, at) {
+            contextMenu.desktopId = desktopId;
+            contextMenu.openAt = at;
+            contextMenu.visible = true;
         }
-        function doPinToggle() {
-            var next = DockModel.togglePin(root.pinnedIds, targetId);
-            root.pinnedIds = next; savePins(); opened = false;
-        }
-        function doNewWindow() {
-            launchDesktop(targetId); opened = false;
-        }
-        function doCloseAll() {
-            for (var i=0;i<root.runningApps.length;i++) if (root.runningApps[i].desktopId===targetId) {
-                var addrs = root.runningApps[i].addresses || [root.runningApps[i].address];
-                for (var a=0;a<addrs.length;a++) {
-                    closeProc.command = ["hyprctl","dispatch","closewindow","address:" + addrs[a]];
-                    closeProc.running = true;
-                }
+
+        PanelWindow {
+            visible: contextMenu.visible
+            color: "transparent"
+            implicitWidth: 10
+            implicitHeight: 10
+            anchors { top: true; bottom: true; left: true; right: true }
+            WlrLayershell.layer: WlrLayer.Overlay
+            WlrLayershell.exclusionMode: ExclusionMode.Ignore
+            mask: Region { item: null }
+
+            MouseArea {
+                anchors.fill: parent
+                onClicked: contextMenu.visible = false
             }
-            opened = false;
-        }
-        Timer { id: closeTimer; interval: 3200; onTriggered: contextMenu.opened = false }
-    }
 
-    PanelWindow {
-        id: menuWindow
-        visible: contextMenu.opened
-        anchors { top: true; bottom: true; left: true; right: true }
-        color: "transparent"
-        WlrLayershell.namespace: "archydock-menu"
-        WlrLayershell.layer: WlrLayer.Overlay
-        WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
-        exclusionMode: ExclusionMode.Ignore
-        mask: Region { item: menuCard }
+            BorderSurface {
+                x: contextMenu.openAt.x
+                y: contextMenu.openAt.y
+                border.width: 0
+                padding: root.padding
+                color: Color.elevated
 
-        MouseArea {
-            anchors.fill: parent
-            onClicked: contextMenu.opened = false
-        }
+                Column {
+                    spacing: 2
 
-        BorderSurface {
-            id: menuCard
-            x: {
-                if (root.position === "left") return Style.space(12) + root.iconSize + root.padding + Style.space(8);
-                if (root.position === "right") return parent.width - width - Style.space(12) - root.iconSize - root.padding - Style.space(8);
-                return (parent.width - width) / 2;
-            }
-            y: {
-                if (root.position === "bottom") return parent.height - height - root.iconSize - root.padding - Style.space(20);
-                if (root.position === "top") return root.iconSize + root.padding + Style.space(20);
-                return (parent.height - height) / 2;
-            }
-            width: menuCol.implicitWidth + Style.space(20)
-            height: menuCol.implicitHeight + Style.space(16)
-            color: Util.alpha(Color.background, 0.98)
-            borderSpec: Border.surfaceSpec("popups", "border", Color.popups.border, Math.max(1, Style.space(1)))
-            radius: Style.cornerRadius
+                    ContextMenuItem {
+                        text: "Unpin from dock"
+                        visible: root.pinnedIds.indexOf(contextMenu.desktopId) !== -1
+                        onClicked: {
+                            var next = DockModel.removePin(root.pinnedIds, contextMenu.desktopId);
+                            root.pinnedIds = next; savePins();
+                            contextMenu.visible = false;
+                        }
+                    }
 
-            Column {
-                id: menuCol
-                anchors.centerIn: parent
-                spacing: Style.space(6)
-                width: parent.width - Style.space(20)
-
-                property bool isPinned: root.pinnedIds.indexOf(contextMenu.targetId) !== -1
-                property string label: {
-                    var e = root.desktopIndex.byId[contextMenu.targetId];
-                    return e ? e.name : contextMenu.targetId.replace(".desktop","").replace("unknown-","");
-                }
-
-                Text {
-                    text: menuCol.label
-                    color: Color.popups.text
-                    font.family: Style.font.family
-                    font.pixelSize: Style.font.body
-                    font.bold: true
-                    elide: Text.ElideRight
-                    width: parent.width
-                }
-                Rectangle { width: parent.width; height: 1; color: Util.alpha(Color.popups.text, 0.12) }
-
-                Repeater {
-                    model: [
-                        { text: menuCol.isPinned ? "Unpin" : "Pin", action: function(){ contextMenu.doPinToggle(); } },
-                        { text: "New window", action: function(){ contextMenu.doNewWindow(); } },
-                        { text: "Close all windows", action: function(){ contextMenu.doCloseAll(); } }
-                    ]
-                    delegate: Rectangle {
-                        width: menuCol.width; height: 28; radius: 6
-                        color: ma.containsMouse ? Util.alpha(Color.accent, 0.18) : "transparent"
-                        Text { anchors.verticalCenter: parent.verticalCenter; anchors.left: parent.left; anchors.leftMargin: 8; text: modelData.text; color: Color.popups.text; font.family: Style.font.family; font.pixelSize: Style.font.body }
-                        MouseArea { id: ma; anchors.fill: parent; hoverEnabled: true; onClicked: modelData.action() }
+                    ContextMenuItem {
+                        text: "Quit running app"
+                        visible: {
+                            for (var i=0;i<root.runningApps.length;i++) if (root.runningApps[i].desktopId === contextMenu.desktopId) return true;
+                            return false;
+                        }
+                        onClicked: {
+                            for (var i=0;i<root.runningApps.length;i++) if (root.runningApps[i].desktopId === contextMenu.desktopId) {
+                                focusProc.command = ["hyprctl","dispatch","closewindow","address:" + root.runningApps[i].address];
+                                focusProc.running = true;
+                            }
+                            contextMenu.visible = false;
+                        }
                     }
                 }
             }
         }
     }
 
-    // ---------------------------------------------------------- settings menu
+    // ----------------------------------------------------------- settings panel
     Item {
         id: settingsContext
-        property bool opened: false
-    }
-
-    PanelWindow {
-        id: settingsWindow
-        visible: settingsContext.opened
-        anchors { top: true; bottom: true; left: true; right: true }
-        color: "transparent"
-        WlrLayershell.namespace: "archydock-settings"
-        WlrLayershell.layer: WlrLayer.Overlay
-        WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
-        exclusionMode: ExclusionMode.Ignore
-        mask: Region { item: settingsCard }
-
-        MouseArea {
-            anchors.fill: parent
-            onClicked: settingsContext.opened = false
-        }
-
-        BorderSurface {
-            id: settingsCard
-            anchors.centerIn: parent
-            width: settingsCol.implicitWidth + Style.space(40)
-            height: settingsCol.implicitHeight + Style.space(40)
-            color: Util.alpha(Color.popups.background, 0.98)
-            borderSpec: Border.surfaceSpec("popups", "border", Color.popups.border, Math.max(1, Style.space(1)))
-            radius: Style.cornerRadius
-
-            Column {
-                id: settingsCol
-                anchors.centerIn: parent
-                width: parent.width - Style.space(40)
-                spacing: Style.space(14)
-
-                Text {
-                    text: "ArchyDock Settings"
-                    color: Color.popups.text
-                    font.family: Style.font.family
-                    font.pixelSize: Style.font.heading
-                    font.bold: true
-                }
-
-                Rectangle { width: parent.width; height: 1; color: Util.alpha(Color.popups.text, 0.12) }
-
-                // Position
-                PanelSectionHeader { text: "Position" }
-                ButtonGroup {
-                    width: parent.width
-                    options: ["Bottom", "Top", "Left", "Right"]
-                    value: {
-                        var map = { bottom: "Bottom", top: "Top", left: "Left", right: "Right" };
-                        return map[root.position] || "Bottom";
-                    }
-                    onChanged: function(val) {
-                        root.position = val.toLowerCase();
-                        savePins();
-                    }
-                }
-
-                // Icon Size
-                PanelSectionHeader { text: "Icon Size" }
-                Row {
-                    spacing: Style.space(8)
-                    width: parent.width
-                    Text {
-                        text: root.iconSize + "px"
-                        color: Color.popups.text
-                        font.family: Style.font.family
-                        font.pixelSize: Style.font.body
-                        width: 50
-                        anchors.verticalCenter: parent.verticalCenter
-                    }
-                    PanelSlider {
-                        width: parent.width - 58
-                        minimum: 24; maximum: 80; step: 4
-                        integer: true
-                        value: root.iconSize
-                        onMoved: function(val) { root.iconSize = val; }
-                        onReleased: function(val) { root.iconSize = val; savePins(); }
-                    }
-                }
-
-                // Spacing
-                PanelSectionHeader { text: "Spacing" }
-                Row {
-                    spacing: Style.space(8)
-                    width: parent.width
-                    Text {
-                        text: root.spacing + "px"
-                        color: Color.popups.text
-                        font.family: Style.font.family
-                        font.pixelSize: Style.font.body
-                        width: 50
-                        anchors.verticalCenter: parent.verticalCenter
-                    }
-                    PanelSlider {
-                        width: parent.width - 58
-                        minimum: 4; maximum: 20; step: 2
-                        integer: true
-                        value: root.spacing
-                        onMoved: function(val) { root.spacing = val; }
-                        onReleased: function(val) { root.spacing = val; savePins(); }
-                    }
-                }
-
-                // Padding
-                PanelSectionHeader { text: "Padding" }
-                Row {
-                    spacing: Style.space(8)
-                    width: parent.width
-                    Text {
-                        text: root.padding + "px"
-                        color: Color.popups.text
-                        font.family: Style.font.family
-                        font.pixelSize: Style.font.body
-                        width: 50
-                        anchors.verticalCenter: parent.verticalCenter
-                    }
-                    PanelSlider {
-                        width: parent.width - 58
-                        minimum: 4; maximum: 24; step: 2
-                        integer: true
-                        value: root.padding
-                        onMoved: function(val) { root.padding = val; }
-                        onReleased: function(val) { root.padding = val; savePins(); }
-                    }
-                }
-
-                // Corner Radius
-                PanelSectionHeader { text: "Corner Radius" }
-                Row {
-                    spacing: Style.space(8)
-                    width: parent.width
-                    Text {
-                        text: root.radius + "px"
-                        color: Color.popups.text
-                        font.family: Style.font.family
-                        font.pixelSize: Style.font.body
-                        width: 50
-                        anchors.verticalCenter: parent.verticalCenter
-                    }
-                    PanelSlider {
-                        width: parent.width - 58
-                        minimum: 0; maximum: 24; step: 2
-                        integer: true
-                        value: root.radius
-                        onMoved: function(val) { root.radius = val; }
-                        onReleased: function(val) { root.radius = val; savePins(); }
-                    }
-                }
-
-                Rectangle { width: parent.width; height: 1; color: Util.alpha(Color.popups.text, 0.12) }
-
-                // Autohide
-                Row {
-                    width: parent.width
-                    spacing: Style.space(8)
-                    Text {
-                        text: "Autohide"
-                        color: Color.popups.text
-                        font.family: Style.font.family
-                        font.pixelSize: Style.font.body
-                        anchors.verticalCenter: parent.verticalCenter
-                    }
-                    Item { width: parent.width - 140; height: 1 }
-                    ToggleSwitch {
-                        checked: root.autohide
-                        onToggled: { root.autohide = !root.autohide; savePins(); }
-                    }
-                }
-            }
-        }
-    }
-
-    // ---------------------------------------------------------- process handlers
-    Process { id: focusProc }
-    Process { id: closeProc }
-    Process { id: launchProc }
-
-    function launchDesktop(desktopId) {
-        var base = String(desktopId).replace(/\.desktop$/,"");
-        launchProc.command = ["gtk-launch", base];
-        launchProc.running = true;
-        noteLaunch(desktopId, 0);
-    }
-
-    Component.onCompleted: {}
-}
-
-// ---------------------------------------------------------------- DockIcon
-// Inline component with progressive icon fallback chain.
-// When Image fails, cycles through DockModel.iconCandidates() entries
-// before showing a styled initial glyph.
-component DockIcon : Item {
-    id: iconRoot
-    property string desktopId: ""
-    property string iconName: "application-x-executable"
-    property bool isRunning: false
-    property bool isPinned: false
-    property int iconSize: 44
-    property int dragIndex: -1
-    signal clicked()
-    signal rightClicked(var globalPos)
-    signal dragMove(int from, int to)
-
-    // Progressive icon fallback
-    property int fallbackIndex: 0
-    property var entry: root.desktopIndex.byId[desktopId]
-    property var allCandidates: {
-        var e = root.desktopIndex.byId[desktopId];
-        return DockModel.iconCandidates(e, null);
-    }
-
-    width: iconSize; height: iconSize
-
-    Rectangle {
-        anchors.fill: parent
-        radius: 10
-        color: iconMouse.containsMouse ? Util.alpha(Color.accent, 0.18) : "transparent"
-        border.width: 0
-    }
-
-    Image {
-        id: iconImg
-        anchors.centerIn: parent
-        width: iconRoot.iconSize - 12
-        height: width
-        source: (iconRoot.iconName && iconRoot.iconName.charAt(0) === "/") ? ("file://" + iconRoot.iconName) : ("image://icon/" + iconRoot.iconName)
-        fillMode: Image.PreserveAspectFit
-        smooth: true
-        onStatusChanged: function(status) {
-            if (status === Image.Error) {
-                iconRoot.fallbackIndex++;
-                if (iconRoot.fallbackIndex < iconRoot.allCandidates.length) {
-                    var next = iconRoot.allCandidates[iconRoot.fallbackIndex];
-                    iconImg.source = (next && next.charAt(0) === "/")
-                        ? ("file://" + next)
-                        : ("image://icon/" + next);
-                } else {
-                    fallbackText.visible = true;
-                }
-            }
-        }
-    }
-
-    Text {
-        id: fallbackText
         visible: false
-        anchors.centerIn: parent
-        text: {
-            var e = root.desktopIndex.byId[iconRoot.desktopId];
-            var name = e ? e.name : iconRoot.desktopId;
-            return name ? name.charAt(0).toUpperCase() : "?";
-        }
-        color: Color.popups.text
-        font.family: Style.font.family
-        font.pixelSize: iconRoot.iconSize * 0.45
-        font.bold: true
-    }
 
-    Rectangle {
-        visible: iconRoot.isRunning
-        width: 6; height: 6; radius: 3
-        anchors.horizontalCenter: parent.horizontalCenter
-        anchors.bottom: parent.bottom
-        anchors.bottomMargin: 2
-        color: Color.accent
-        border.color: Util.alpha(Color.background, 0.9)
-        border.width: 1
-    }
+        function openFor() { settingsContext.visible = true; }
 
-    MouseArea {
-        id: iconMouse
-        anchors.fill: parent
-        hoverEnabled: true
-        acceptedButtons: Qt.LeftButton | Qt.RightButton
-        drag.target: iconRoot.dragIndex >= 0 ? parent : undefined
-        drag.axis: Drag.XAxis
-        onClicked: function(ev) {
-            if (ev.button === Qt.LeftButton) iconRoot.clicked();
-            else if (ev.button === Qt.RightButton) iconRoot.rightClicked(mapToGlobal(ev.x, ev.y));
-        }
-        onPressAndHold: if (iconRoot.isPinned) Drag.active = true
-    }
+        PanelWindow {
+            visible: settingsContext.visible
+            color: "transparent"
+            implicitWidth: 10
+            implicitHeight: 10
+            anchors { top: true; bottom: true; left: true; right: true }
+            WlrLayershell.layer: WlrLayer.Overlay
+            WlrLayershell.exclusionMode: ExclusionMode.Ignore
+            mask: Region { item: null }
 
-    DropArea {
-        enabled: iconRoot.isPinned
-        anchors.fill: parent
-        onDropped: function(drop) {
-            if (drop.source && drop.source.dragIndex !== undefined) {
-                iconRoot.dragMove(drop.source.dragIndex, iconRoot.dragIndex);
+            MouseArea {
+                anchors.fill: parent
+                onClicked: settingsContext.visible = false
+            }
+
+            PopupCard {
+                bar: dockCard
+                border.width: 0
+                color: Color.elevated
+                padding: root.padding
+
+                Column {
+                    spacing: root.padding
+
+                    PanelSectionHeader { text: "Position" }
+
+                    ButtonGroup {
+                        options: ["Bottom","Top","Left","Right"]
+                        value: root.position.charAt(0).toUpperCase() + root.position.slice(1)
+                        changed: function(val) {
+                            root.position = val.toLowerCase();
+                            root.settings.position = root.position;
+                            settingsStub.settingsData = JSON.stringify(root.settings, null, 2);
+                            settingsStub.reload();
+                        }
+                    }
+
+                    PanelSeparator {}
+
+                    PanelSectionHeader { text: "Icon size" }
+
+                    PanelSlider {
+                        value: root.iconSize
+                        minimum: 32
+                        maximum: 96
+                        step: 4
+                        moved: function(val) { root.iconSize = val; }
+                        released: function(val) {
+                            root.iconSize = val;
+                            root.settings.iconSize = val;
+                            settingsStub.settingsData = JSON.stringify(root.settings, null, 2);
+                            settingsStub.reload();
+                        }
+                    }
+
+                    PanelSeparator {}
+
+                    PanelSectionHeader { text: "Icon spacing" }
+
+                    PanelSlider {
+                        value: root.spacing
+                        minimum: 0
+                        maximum: 12
+                        step: 1
+                        moved: function(val) { root.spacing = val; }
+                        released: function(val) {
+                            root.spacing = val;
+                            root.settings.spacing = val;
+                            settingsStub.settingsData = JSON.stringify(root.settings, null, 2);
+                            settingsStub.reload();
+                        }
+                    }
+
+                    PanelSeparator {}
+
+                    PanelSectionHeader { text: "Launcher" }
+
+                    Row {
+                        spacing: 6
+                        anchors.horizontalCenter: parent.horizontalCenter
+
+                        Text {
+                            text: root.launcherDesktop
+                            color: Color.popups.text
+                            font.family: Style.font.family
+                            font.pixelSize: Style.font.caption
+                            width: 180
+                            elide: Text.ElideRight
+                            anchors.verticalCenter: parent.verticalCenter
+                        }
+
+                        Text {
+                            text: "change"
+                            color: Color.accent
+                            font.family: Style.font.family
+                            font.pixelSize: Style.font.caption
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                    launcherDialog.opened = true;
+                                    settingsContext.visible = false;
+                                }
+                            }
+                        }
+                    }
+
+                    PanelSeparator {}
+
+                    ToggleSwitch {
+                        text: "Enabled"
+                        checked: root.opened
+                        onToggled: {
+                            root.opened = checked;
+                            root.settings.enabled = checked;
+                            settingsStub.settingsData = JSON.stringify(root.settings, null, 2);
+                            settingsStub.reload();
+                        }
+                    }
+
+                    PanelSeparator {}
+
+                    Row {
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        spacing: 10
+
+                        Text {
+                            text: "Save"
+                            font.family: Style.font.family
+                            font.pixelSize: Style.font.caption
+                            color: Color.accent
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: settingsContext.visible = false
+                            }
+                        }
+                    }
+
+                    Item { width: 1; height: 1 }
+                }
             }
         }
     }
 
-    Drag.active: iconMouse.drag.active
-    Drag.hotSpot.x: width/2; Drag.hotSpot.y: height/2
-    Drag.source: iconRoot
+    // ----------------------------------------------------------- launcher picker
+    Item {
+        id: launcherDialog
+        property bool opened: false
+
+        PanelWindow {
+            visible: launcherDialog.opened
+            color: "transparent"
+            implicitWidth: 10
+            implicitHeight: 10
+            anchors { top: true; bottom: true; left: true; right: true }
+            WlrLayershell.layer: WlrLayer.Overlay
+            WlrLayershell.exclusionMode: ExclusionMode.Ignore
+            mask: Region { item: null }
+
+            MouseArea {
+                anchors.fill: parent
+                onClicked: launcherDialog.opened = false
+            }
+
+            PopupCard {
+                bar: dockCard
+                border.width: 0
+                color: Color.elevated
+                padding: root.padding
+
+                Column {
+                    spacing: 8
+                    width: 300
+
+                    PanelSectionHeader { text: "Choose launcher app" }
+
+                    Repeater {
+                        model: DesktopEntries.installed
+                        delegate: Item {
+                            width: parent.width
+                            height: 28
+                            visible: !modelData.noDisplay
+
+                            Row {
+                                anchors.fill: parent
+                                spacing: 8
+
+                                Image {
+                                    source: "image://icon/" + (modelData.icon || "application-x-executable")
+                                    width: 20; height: 20
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    fillMode: Image.PreserveAspectFit
+                                }
+
+                                Text {
+                                    text: modelData.name || modelData.fileName
+                                    color: Color.popups.text
+                                    font.family: Style.font.family
+                                    font.pixelSize: Style.font.caption
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    elide: Text.ElideRight
+                                    width: parent.width - 28
+                                }
+                            }
+
+                            MouseArea {
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                onClicked: {
+                                    root.launcherDesktop = modelData.fileName;
+                                    root.settings.launcher = modelData.fileName;
+                                    settingsStub.settingsData = JSON.stringify(root.settings, null, 2);
+                                    settingsStub.reload();
+                                    launcherDialog.opened = false;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
